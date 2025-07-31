@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Shibu Live Location - Simplified</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Firebase SDKs - v8 Syntax -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; background: #f9fafb; margin: 0; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
+    h1, h2 { color: #1f2937; }
+    #map { width: 100%; height: 500px; margin-top: 20px; border-radius: 10px; }
+    button { background: #3b82f6; color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; transition: background 0.3s; }
+    button:hover { background: #2563eb; }
+    #stopButton { background: #ef4444; }
+    #stopButton:hover { background: #dc2626; }
+    #logoutButton { background: #6b7280; font-size: 14px; padding: 8px 12px; }
+    #logoutButton:hover { background: #4b5563; }
+    input { padding: 10px; width: calc(100% - 22px); margin-top: 10px; border: 1px solid #d1d5db; border-radius: 8px; }
+    .hidden { display: none; }
+    #status { margin-top: 15px; font-weight: 500; color: #16a34a; }
+    #error { color: #dc2626; margin-top: 10px; }
+    .auth-form { max-width: 320px; margin: 20px auto; }
+    .user-info { font-size: 14px; color: #4b5563; margin-bottom: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📍 Live Location Tracker</h1>
+
+    <!-- User View (No Login Required) -->
+    <div id="user-view" class="hidden">
+      <h2>Welcome, <span id="user-name-display"></span>!</h2>
+      <p>Click the button below to share your live location.</p>
+      <button id="shareButton" onclick="shareLocation()">Share Live Location</button>
+      <button id="stopButton" class="hidden" onclick="stopSharing()">Stop Sharing</button>
+      <p id="status"></p>
+    </div>
+
+    <!-- Login View (For Admin) -->
+    <div id="login-view" class="hidden">
+      <h2>Admin Login</h2>
+      <div class="auth-form">
+        <input type="email" id="email" placeholder="Email" required />
+        <input type="password" id="password" placeholder="Password" required />
+        <button onclick="handleLogin()">Login</button>
+        <p id="error" class="hidden"></p>
+      </div>
+    </div>
+
+    <!-- Admin View -->
+    <div id="admin-view" class="hidden">
+      <div class="user-info">Admin View | Logged in as: <span id="admin-email-display"></span> <button id="logoutButton" onclick="handleLogout()">Logout</button></div>
+      <h2>Live Location of All Users</h2>
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script>
+    // --- Firebase Configuration ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyA8urfCvruIDR1G1szDu1oSSh2yALUw4DI",
+      authDomain: "sbj-education.firebaseapp.com",
+      databaseURL: "https://sbj-education-default-rtdb.firebaseio.com",
+      projectId: "sbj-education",
+      storageBucket: "sbj-education.appspot.com",
+      messagingSenderId: "281508002260",
+      appId: "1:281508002260:web:38f5f770f37b2fdc87be41",
+      measurementId: "G-YHJRSDB6WB"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.database();
+
+    // --- Global State Variables ---
+    let watchId = null;
+    let map = null;
+    let userMarkers = {};
+    let userPolylines = {};
+    let localUserId = null;
+    let localUserName = null;
+
+    // --- Main Controller ---
+    const urlParams = new URLSearchParams(window.location.search);
+    const mode = urlParams.get("mode");
+
+    if (mode === 'admin') {
+      // --- ADMIN MODE ---
+      document.getElementById('user-view').classList.add('hidden');
+      auth.onAuthStateChanged(user => {
+        if (user) {
+          // Admin is logged in, show map
+          document.getElementById('login-view').classList.add('hidden');
+          document.getElementById('admin-view').classList.remove('hidden');
+          document.getElementById('admin-email-display').innerText = user.email;
+          initAdminMap();
+        } else {
+          // Admin needs to log in
+          document.getElementById('admin-view').classList.add('hidden');
+          document.getElementById('login-view').classList.remove('hidden');
+          cleanup();
+        }
+      });
+    } else {
+      // --- NORMAL USER MODE ---
+      document.getElementById('login-view').classList.add('hidden');
+      document.getElementById('admin-view').classList.add('hidden');
+      document.getElementById('user-view').classList.remove('hidden');
+      initUserView();
+    }
+    
+    // --- Authentication (For Admin) ---
+    function handleLogin() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const errorElement = document.getElementById('error');
+      auth.signInWithEmailAndPassword(email, password)
+        .catch(error => {
+          errorElement.innerText = error.message;
+          errorElement.classList.remove('hidden');
+        });
+    }
+
+    function handleLogout() {
+      auth.signOut();
+    }
+
+    // --- User Logic (No Login) ---
+    function initUserView() {
+      localUserId = localStorage.getItem('liveTrackerUserId');
+      localUserName = localStorage.getItem('liveTrackerUserName');
+
+      if (!localUserId || !localUserName) {
+        localUserName = prompt("Please enter your name to display on the map:", "Anonymous");
+        if (!localUserName) localUserName = "Anonymous";
+        
+        localUserId = 'user-' + Date.now() + Math.random().toString(36).substr(2, 9);
+        
+        localStorage.setItem('liveTrackerUserId', localUserId);
+        localStorage.setItem('liveTrackerUserName', localUserName);
+      }
+      
+      document.getElementById('user-name-display').innerText = localUserName;
+    }
+
+    window.shareLocation = function () {
+      if (!navigator.geolocation) {
+        document.getElementById('status').innerText = "Geolocation is not supported by your browser.";
+        return;
+      }
+      
+      const options = { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 };
+      watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          db.ref("locations/" + localUserId).set({
+            lat: latitude,
+            lon: longitude,
+            name: localUserName,
+            time: new Date().toISOString(),
+          });
+          document.getElementById('status').innerText = "✅ Live location is being shared...";
+        },
+        () => {
+          document.getElementById('status').innerText = "❌ Unable to fetch location.";
+        },
+        options
+      );
+
+      document.getElementById('shareButton').classList.add('hidden');
+      document.getElementById('stopButton').classList.remove('hidden');
+    };
+
+    window.stopSharing = function () {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        
+        // Remove location from DB to show user as offline
+        db.ref("locations/" + localUserId).remove();
+        
+        document.getElementById('status').innerText = "🛑 Location sharing stopped.";
+        document.getElementById('shareButton').classList.remove('hidden');
+        document.getElementById('stopButton').classList.add('hidden');
+      }
+    };
+
+    // --- Admin Logic ---
+    function initAdminMap() {
+      if (map) return;
+
+      map = L.map('map').setView([23.8103, 90.4125], 7); // Default view over Bangladesh
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(map);
+
+      db.ref("locations").on("value", (snapshot) => {
+        const allLocations = snapshot.val() || {};
+        const activeUserIds = Object.keys(allLocations);
+
+        // Remove inactive users' markers
+        Object.keys(userMarkers).forEach(userId => {
+            if (!activeUserIds.includes(userId)) {
+                if (map.hasLayer(userMarkers[userId])) map.removeLayer(userMarkers[userId]);
+                if (map.hasLayer(userPolylines[userId])) map.removeLayer(userPolylines[userId]);
+                delete userMarkers[userId];
+                delete userPolylines[userId];
+            }
+        });
+
+        activeUserIds.forEach(userId => {
+            const userData = allLocations[userId];
+            const latlng = [userData.lat, userData.lon];
+            
+            const userIcon = L.icon({
+                iconUrl: 'https://i.imgur.com/v82Fv11.png',
+                iconSize: [38, 38], iconAnchor: [19, 38], popupAnchor: [0, -40]
+            });
+
+            if (userMarkers[userId]) {
+                userMarkers[userId].setLatLng(latlng);
+                userPolylines[userId].addLatLng(latlng);
+            } else {
+                userMarkers[userId] = L.marker(latlng, { icon: userIcon }).addTo(map);
+                userPolylines[userId] = L.polyline([latlng], { color: 'blue', weight: 5 }).addTo(map);
+            }
+
+            const popupContent = `<b>${userData.name || 'Unknown User'}</b><br>Last updated: ${new Date(userData.time).toLocaleTimeString()}`;
+            userMarkers[userId].bindPopup(popupContent);
+        });
+
+        if (activeUserIds.length > 0) {
+            const group = new L.featureGroup(Object.values(userMarkers));
+            map.fitBounds(group.getBounds().pad(0.5));
+        }
+      });
+    }
+    
+    // --- Cleanup function ---
+    function cleanup() {
+        if (map) {
+            map.remove();
+            map = null;
+        }
+        userMarkers = {};
+        userPolylines = {};
+        db.ref('locations').off();
+    }
+  </script>
+</body>
+</html>
