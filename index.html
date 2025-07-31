@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Location Tracker - Password Access</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; background: #f9fafb; margin: 0; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
+    h1, h2 { color: #1f2937; }
+    #map { width: 100%; height: 500px; margin-top: 20px; border-radius: 10px; }
+    button { background: #3b82f6; color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; transition: background 0.3s; }
+    button:hover { background: #2563eb; }
+    #stopButton { background: #ef4444; }
+    #stopButton:hover { background: #dc2626; }
+    #logoutButton { background: #6b7280; font-size: 14px; padding: 8px 12px; }
+    #logoutButton:hover { background: #4b5563; }
+    input { padding: 10px; width: calc(100% - 22px); margin-top: 10px; border: 1px solid #d1d5db; border-radius: 8px; }
+    .hidden { display: none; }
+    #status, #admin-message { margin-top: 15px; font-weight: 500; }
+    .success { color: #16a34a; }
+    .error { color: #dc2626; margin-top: 10px; }
+    .password-form { max-width: 320px; margin: 20px auto; }
+    .admin-controls { background: #f3f4f6; padding: 15px; border-radius: 8px; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📍 Live Location Tracker</h1>
+
+    <!-- User View (No Login Required) -->
+    <div id="user-view" class="hidden">
+      <h2>Welcome, <span id="user-name-display"></span>!</h2>
+      <p>Click the button below to share your live location.</p>
+      <button id="shareButton" onclick="shareLocation()">Share Live Location</button>
+      <button id="stopButton" class="hidden" onclick="stopSharing()">Stop Sharing</button>
+      <p id="status"></p>
+    </div>
+
+    <!-- Password View (For Admin) -->
+    <div id="password-view" class="hidden">
+      <h2>Admin Access</h2>
+      <div class="password-form">
+        <input type="password" id="admin-password" placeholder="Enter Admin Password" required />
+        <button onclick="handlePasswordSubmit()">Enter</button>
+        <p id="password-error" class="error hidden"></p>
+      </div>
+    </div>
+
+    <!-- Admin View -->
+    <div id="admin-view" class="hidden">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2>All Users Live Location</h2>
+        <button id="logoutButton" onclick="handleLogout()">Logout</button>
+      </div>
+      <div id="map"></div>
+      <div class="admin-controls">
+        <h3>Admin Settings</h3>
+        <input type="text" id="new-password" placeholder="Enter new password" />
+        <button onclick="changePassword()">Change Password</button>
+        <p id="admin-message"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- Firebase Configuration ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyA8urfCvruIDR1G1szDu1oSSh2yALUw4DI",
+      authDomain: "sbj-education.firebaseapp.com",
+      databaseURL: "https://sbj-education-default-rtdb.firebaseio.com",
+      projectId: "sbj-education",
+      storageBucket: "sbj-education.appspot.com",
+      messagingSenderId: "281508002260",
+      appId: "1:281508002260:web:38f5f770f37b2fdc87be41"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // --- Global State Variables ---
+    let watchId = null;
+    let map = null;
+    let userMarkers = {};
+    let userPolylines = {};
+    let localUserId = null;
+    let localUserName = null;
+
+    // --- Main Controller ---
+    const urlParams = new URLSearchParams(window.location.search);
+    const mode = urlParams.get("mode");
+
+    if (mode === 'admin') {
+      // --- ADMIN MODE ---
+      if (sessionStorage.getItem('isAdminAuthenticated') === 'true') {
+        showAdminView();
+      } else {
+        document.getElementById('password-view').classList.remove('hidden');
+      }
+    } else {
+      // --- NORMAL USER MODE ---
+      document.getElementById('user-view').classList.remove('hidden');
+      initUserView();
+    }
+    
+    // --- Admin Password Logic ---
+    async function handlePasswordSubmit() {
+        const enteredPassword = document.getElementById('admin-password').value;
+        const errorEl = document.getElementById('password-error');
+        
+        const passwordRef = db.ref('admin/config/password');
+        const snapshot = await passwordRef.once('value');
+        const storedPassword = snapshot.val() || '4058'; // Default password
+
+        if (enteredPassword === storedPassword) {
+            sessionStorage.setItem('isAdminAuthenticated', 'true');
+            showAdminView();
+        } else {
+            errorEl.innerText = 'Incorrect password.';
+            errorEl.classList.remove('hidden');
+        }
+    }
+    
+    function showAdminView() {
+        document.getElementById('password-view').classList.add('hidden');
+        document.getElementById('admin-view').classList.remove('hidden');
+        initAdminMap();
+    }
+
+    function handleLogout() {
+        sessionStorage.removeItem('isAdminAuthenticated');
+        document.getElementById('admin-view').classList.add('hidden');
+        document.getElementById('password-view').classList.remove('hidden');
+        cleanup();
+        location.reload(); // Reload to clear state
+    }
+
+    async function changePassword() {
+        const newPassword = document.getElementById('new-password').value;
+        const messageEl = document.getElementById('admin-message');
+
+        if (!newPassword || newPassword.length < 4) {
+            messageEl.innerText = 'Password must be at least 4 characters long.';
+            messageEl.className = 'error';
+            return;
+        }
+
+        try {
+            await db.ref('admin/config/password').set(newPassword);
+            messageEl.innerText = 'Password changed successfully!';
+            messageEl.className = 'success';
+            document.getElementById('new-password').value = '';
+        } catch (error) {
+            messageEl.innerText = 'Error changing password: ' + error.message;
+            messageEl.className = 'error';
+        }
+    }
+
+    // --- User Logic (No Login) ---
+    function initUserView() {
+      // ... (This section is unchanged from the previous code)
+      localUserId = localStorage.getItem('liveTrackerUserId');
+      localUserName = localStorage.getItem('liveTrackerUserName');
+      if (!localUserId) {
+        localUserName = prompt("Please enter your name to display on the map:", "User" + Math.floor(Math.random() * 1000));
+        if (!localUserName) localUserName = "Anonymous";
+        localUserId = 'user-' + Date.now() + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('liveTrackerUserId', localUserId);
+        localStorage.setItem('liveTrackerUserName', localUserName);
+      }
+      document.getElementById('user-name-display').innerText = localUserName;
+    }
+
+    window.shareLocation = function () {
+      // ... (Unchanged)
+      if (!navigator.geolocation) { document.getElementById('status').innerText = "Geolocation not supported."; return; }
+      const options = { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 };
+      watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          db.ref("locations/" + localUserId).set({ lat: latitude, lon: longitude, name: localUserName, time: new Date().toISOString() });
+          document.getElementById('status').innerText = "✅ Live location is being shared...";
+        },
+        () => { document.getElementById('status').innerText = "❌ Unable to fetch location."; },
+        options
+      );
+      document.getElementById('shareButton').classList.add('hidden');
+      document.getElementById('stopButton').classList.remove('hidden');
+    };
+
+    window.stopSharing = function () {
+      // ... (Unchanged)
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        db.ref("locations/" + localUserId).remove();
+        document.getElementById('status').innerText = "🛑 Location sharing stopped.";
+        document.getElementById('shareButton').classList.remove('hidden');
+        document.getElementById('stopButton').classList.add('hidden');
+      }
+    };
+
+    // --- Admin Map Logic ---
+    function initAdminMap() {
+      // ... (Unchanged)
+      if (map) return;
+      map = L.map('map').setView([23.8103, 90.4125], 7);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+      db.ref("locations").on("value", (snapshot) => {
+        const allLocations = snapshot.val() || {};
+        const activeUserIds = Object.keys(allLocations);
+        Object.keys(userMarkers).forEach(userId => {
+            if (!activeUserIds.includes(userId)) {
+                if (map.hasLayer(userMarkers[userId])) map.removeLayer(userMarkers[userId]);
+                if (map.hasLayer(userPolylines[userId])) map.removeLayer(userPolylines[userId]);
+                delete userMarkers[userId]; delete userPolylines[userId];
+            }
+        });
+        activeUserIds.forEach(userId => {
+            const userData = allLocations[userId];
+            const latlng = [userData.lat, userData.lon];
+            const userIcon = L.icon({ iconUrl: 'https://i.imgur.com/v82Fv11.png', iconSize: [38, 38], iconAnchor: [19, 38], popupAnchor: [0, -40] });
+            if (userMarkers[userId]) {
+                userMarkers[userId].setLatLng(latlng); userPolylines[userId].addLatLng(latlng);
+            } else {
+                userMarkers[userId] = L.marker(latlng, { icon: userIcon }).addTo(map);
+                userPolylines[userId] = L.polyline([latlng], { color: 'blue', weight: 5 }).addTo(map);
+            }
+            userMarkers[userId].bindPopup(`<b>${userData.name || 'Unknown'}</b><br>Last updated: ${new Date(userData.time).toLocaleTimeString()}`);
+        });
+        if (activeUserIds.length > 0) {
+            const group = new L.featureGroup(Object.values(userMarkers));
+            map.fitBounds(group.getBounds().pad(0.5));
+        }
+      });
+    }
+    
+    // --- Cleanup function ---
+    function cleanup() {
+      if (map) { map.remove(); map = null; }
+      userMarkers = {}; userPolylines = {};
+      db.ref('locations').off();
+    }
+  </script>
+</body>
+</html>
